@@ -438,7 +438,7 @@ window.addEventListener('securitypolicyviolation', (e) => {
   });
 });
 
-import { debugGetCells, getCellCount } from '@/services/geo-convergence';
+import { debugGetCells, getCellCount } from './services/geo-convergence';
 import { initMetaTags } from '@/services/meta-tags';
 import { installRuntimeFetchPatch, installWebApiRedirect } from '@/services/runtime';
 import { loadDesktopSecrets } from '@/services/runtime-config';

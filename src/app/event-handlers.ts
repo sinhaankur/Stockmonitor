@@ -473,7 +473,14 @@ export class EventHandlerManager implements AppModule {
     this.ctx.container.querySelectorAll<HTMLAnchorElement>('.variant-option').forEach(link => {
       link.addEventListener('click', (e) => {
         const variant = link.dataset.variant;
-        if (!variant || variant === SITE_VARIANT) return;
+        if (!variant) return;
+        if (variant === SITE_VARIANT) {
+          if (variant === 'full') {
+            e.preventDefault();
+            this.restoreDefaultStockView();
+          }
+          return;
+        }
         e.preventDefault();
         void this.navigateToVariant(variant, {
           href: link.href,
@@ -583,7 +590,14 @@ export class EventHandlerManager implements AppModule {
     menu.querySelectorAll<HTMLButtonElement>('.mobile-menu-variant').forEach(btn => {
       btn.addEventListener('click', () => {
         const variant = btn.dataset.variant;
-        if (!variant || variant === SITE_VARIANT) return;
+        if (!variant) return;
+        if (variant === SITE_VARIANT) {
+          if (variant === 'full') {
+            this.closeMobileMenu();
+            this.restoreDefaultStockView();
+          }
+          return;
+        }
         void this.navigateToVariant(variant, { isLocalDev });
       });
     });
@@ -675,6 +689,37 @@ export class EventHandlerManager implements AppModule {
     sheet.classList.remove('open');
     backdrop.classList.remove('open');
     document.body.style.overflow = '';
+  }
+
+  private restoreDefaultStockView(): void {
+    if (SITE_VARIANT !== 'full') return;
+
+    const defaultPanelSet = new Set(['map', 'strategic-risk', 'stock-monitor', 'stock-global-intelligence']);
+    let changed = false;
+
+    for (const [key, config] of Object.entries(this.ctx.panelSettings)) {
+      if (key === 'runtime-config' || key.startsWith('cw-') || key.startsWith('mcp-')) continue;
+      const shouldEnable = defaultPanelSet.has(key);
+      if (Boolean(config.enabled) !== shouldEnable) {
+        this.ctx.panelSettings[key] = { ...config, enabled: shouldEnable };
+        changed = true;
+      }
+    }
+
+    for (const key of defaultPanelSet) {
+      if (!this.ctx.panelSettings[key]) {
+        this.ctx.panelSettings[key] = { name: key, enabled: true, priority: 1 };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      saveToStorage(STORAGE_KEYS.panels, this.ctx.panelSettings);
+      this.applyPanelSettings();
+      this.callbacks.updateSearchIndex();
+    }
+
+    this.ctx.panels['stock-monitor']?.getElement()?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   private setupIdleDetection(): void {

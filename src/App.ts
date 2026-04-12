@@ -618,6 +618,24 @@ export class App {
       }
     }
 
+    // One-time migration: restore Global Map for full variant stock/global preset.
+    // This fixes sessions where map was unintentionally hidden by stored panel settings.
+    const MAP_RESTORE_MIGRATION_KEY = 'worldmonitor-map-restore-v2.6.9';
+    if (SITE_VARIANT === 'full' && !localStorage.getItem(MAP_RESTORE_MIGRATION_KEY)) {
+      const isStockGlobalPreset = Boolean(panelSettings['strategic-risk']?.enabled)
+        && Boolean(panelSettings['stock-monitor']?.enabled)
+        && Boolean(panelSettings['stock-global-intelligence']?.enabled);
+      if (isStockGlobalPreset) {
+        panelSettings.map = {
+          ...getEffectivePanelConfig('map', SITE_VARIANT),
+          ...panelSettings.map,
+          enabled: true,
+        };
+        saveToStorage(STORAGE_KEYS.panels, panelSettings);
+      }
+      localStorage.setItem(MAP_RESTORE_MIGRATION_KEY, 'done');
+    }
+
     const initialUrlState: ParsedMapUrlState | null = parseMapUrlState(window.location.search, mapLayers);
     if (initialUrlState.layers) {
       mapLayers = normalizeExclusiveChoropleths(

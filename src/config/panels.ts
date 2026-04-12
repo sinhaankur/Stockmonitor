@@ -15,8 +15,9 @@ const FULL_PANELS: Record<string, PanelConfig> = {
   'strategic-risk': { name: 'Global Situations', enabled: true, priority: 1 },
   'stock-monitor': { name: 'Stock Monitor', enabled: true, priority: 1 },
   'stock-global-intelligence': { name: 'Stock Global Intelligence', enabled: true, priority: 1 },
+  // Keep map visible alongside the stock/global-situations preset.
+  map: { name: 'Global Map', enabled: true, priority: 1 },
   // All other panels available via panel picker but off by default
-  map: { name: 'Global Map', enabled: false, priority: 1 },
   'live-news': { name: 'Live News', enabled: false, priority: 1 },
   'live-webcams': { name: 'Live Webcams', enabled: false, priority: 1 },
   'windy-webcams': { name: 'Windy Live Webcam', enabled: false, priority: 2 },

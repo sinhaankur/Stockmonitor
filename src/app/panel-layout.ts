@@ -220,9 +220,9 @@ export class PanelLayoutManager implements AppModule {
                class="variant-option ${SITE_VARIANT === 'full' ? 'active' : ''}"
                data-variant="full"
                ${vTarget('full')}
-               title="${t('header.world')}${SITE_VARIANT === 'full' ? ` ${t('common.currentVariant')}` : ''}">
+               title="${SITE_VARIANT === 'full' ? 'Stock Monitor (Default View)' : 'Stock Monitor'}${SITE_VARIANT === 'full' ? ` ${t('common.currentVariant')}` : ''}">
               <span class="variant-icon">🌍</span>
-              <span class="variant-label">${t('header.world')}</span>
+              <span class="variant-label">Stock</span>
             </a>
             <span class="variant-divider"></span>
             <a href="${vHref('tech', 'https://tech.worldmonitor.app')}"
@@ -314,7 +314,7 @@ export class PanelLayoutManager implements AppModule {
         <div class="mobile-menu-divider"></div>
         ${(() => {
         const variants = [
-          { key: 'full', icon: '🌍', label: t('header.world') },
+          { key: 'full', icon: '🌍', label: 'Stock (Default)' },
           { key: 'tech', icon: '💻', label: t('header.tech') },
           { key: 'finance', icon: '📈', label: t('header.finance') },
           { key: 'commodity', icon: '⛏️', label: t('header.commodity') },
