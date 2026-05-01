@@ -77,7 +77,7 @@ function plainRiskLabel(level: 'low' | 'medium' | 'high'): string {
 export class StockMonitorPanel extends Panel {
   private holdings: PortfolioHolding[] = [];
   private searchQuery = '';
-  private searchResults: StockCatalogEntry[] = [];
+  private searchResults: StockCatalogEntry[] = searchStockCatalog('');
   private selectedTicker: string | null = null;
   private newsByTicker = new Map<string, StockNewsItem[]>();
   private loadingNewsTicker: string | null = null;
@@ -170,7 +170,29 @@ export class StockMonitorPanel extends Panel {
       target.value = '';
     });
 
+    window.addEventListener('wm:select-stock', this.handleSelectStockEvent);
+
     void this.loadRows(getDefaultPortfolioRows(), 'Loading demo portfolio…');
+  }
+
+  private handleSelectStockEvent = (event: Event): void => {
+    const detail = (event as CustomEvent<{ ticker?: string }>).detail;
+    const ticker = detail?.ticker;
+    if (!ticker) return;
+    void this.selectStockByTicker(ticker);
+  };
+
+  private async selectStockByTicker(ticker: string): Promise<void> {
+    this.getElement().scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (this.holdings.some((holding) => holding.ticker === ticker)) {
+      this.selectTicker(ticker);
+      return;
+    }
+    this.selectedTicker = ticker;
+    await this.addStock(ticker);
+    if (this.holdings.some((holding) => holding.ticker === ticker)) {
+      this.selectTicker(ticker);
+    }
   }
 
   private selectTicker(ticker: string): void {
@@ -252,7 +274,7 @@ export class StockMonitorPanel extends Panel {
     }));
     if (!existing.has(ticker)) rows.push({ ticker, shares: 10, purchasePrice: null, purchaseDate: null });
     this.searchQuery = '';
-    this.searchResults = [];
+    this.searchResults = searchStockCatalog('');
     await this.loadRows(rows, `Fetching ${ticker}…`);
   }
 
@@ -339,13 +361,19 @@ export class StockMonitorPanel extends Panel {
   }
 
   private renderSearchResults(): string {
-    if (!this.searchQuery.trim()) return '';
-    if (this.searchResults.length === 0) {
+    const isQuery = this.searchQuery.trim().length > 0;
+    if (isQuery && this.searchResults.length === 0) {
       return `<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">No matching stocks in the current universe. Try a ticker like MSFT, TSM, SAP, or BABA, or upload a CSV portfolio.</div>`;
     }
+    if (this.searchResults.length === 0) return '';
+
+    const heading = isQuery
+      ? `${this.searchResults.length} match${this.searchResults.length === 1 ? '' : 'es'}`
+      : 'Popular tickers';
 
     return `
       <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+        <div style="font-size:10px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:var(--text-dim)">${escapeHtml(heading)}</div>
         ${this.searchResults.map((entry) => `
           <button type="button" data-add-ticker="${escapeHtml(entry.ticker)}" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;background:rgba(255,255,255,0.03);color:inherit;text-align:left;cursor:pointer">
             <span>

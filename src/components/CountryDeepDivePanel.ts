@@ -18,6 +18,7 @@ import { hasPremiumAccess } from '@/services/panel-gating';
 import { getAuthState } from '@/services/auth-state';
 import { trackGateHit } from '@/services/analytics';
 import { fetchBypassOptions, fetchChokepointStatus } from '@/services/supply-chain';
+import { findStocksExposedToCountry } from '@/services/stock-monitor';
 import { haversineDistanceKm } from '@/services/related-assets';
 import type {
   CountryBriefPanel,
@@ -99,6 +100,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   private infrastructureBody: HTMLElement | null = null;
   private economicBody: HTMLElement | null = null;
   private marketsBody: HTMLElement | null = null;
+  private stockExposureBody: HTMLElement | null = null;
   private briefBody: HTMLElement | null = null;
   private timelineBody: HTMLElement | null = null;
   private scoreCard: HTMLElement | null = null;
@@ -237,6 +239,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.economicIndicators = [];
     this.infrastructureByType.clear();
     this.renderSkeleton(country, code, score, signals);
+    this.renderStockExposure(code);
     this.content.scrollTop = 0;
     this.open();
   }
@@ -1963,6 +1966,87 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.renderEconomicIndicators();
   }
 
+  private renderStockExposure(code: string): void {
+    if (!this.stockExposureBody) return;
+    this.stockExposureBody.replaceChildren();
+
+    const exposures = findStocksExposedToCountry(code);
+    if (exposures.length === 0) {
+      this.stockExposureBody.append(this.makeEmpty('No tracked stocks have exposure to this country.'));
+      return;
+    }
+
+    const list = this.el('div', 'cdp-stock-exposure-list');
+    list.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+
+    const rowStyle = 'display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid #2c2f36;border-radius:6px;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit;width:100%';
+    const tagBase = 'display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:0.02em';
+    const riskColors: Record<string, string> = {
+      high: 'background:#7f1d1d;color:#fecaca',
+      medium: 'background:#78350f;color:#fed7aa',
+      low: 'background:#14532d;color:#bbf7d0',
+    };
+    const relColor = 'background:#1e3a8a;color:#bfdbfe';
+    const sectorColor = 'background:#374151;color:#d1d5db';
+
+    for (const exp of exposures.slice(0, 15)) {
+      const row = this.el('button', 'cdp-stock-exposure-item');
+      row.setAttribute('type', 'button');
+      row.setAttribute('data-stock-ticker', exp.entry.ticker);
+      row.style.cssText = rowStyle;
+
+      const top = this.el('div', 'cdp-stock-exposure-top');
+      top.style.cssText = 'display:flex;align-items:baseline;gap:8px;flex-wrap:wrap';
+      const ticker = this.el('span', 'cdp-stock-exposure-ticker', exp.entry.ticker);
+      ticker.style.cssText = 'font-weight:700;font-size:13px';
+      const name = this.el('span', 'cdp-stock-exposure-name', exp.entry.companyName);
+      name.style.cssText = 'font-size:11px;color:var(--text-dim,#9ca3af);overflow:hidden;text-overflow:ellipsis';
+      top.append(ticker, name);
+
+      const tags = this.el('div', 'cdp-stock-exposure-tags');
+      tags.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap';
+
+      const relTag = this.el('span', 'cdp-tag', exp.relationship);
+      relTag.style.cssText = `${tagBase};${relColor}`;
+      tags.append(relTag);
+
+      if (exp.risk) {
+        const riskTag = this.el('span', 'cdp-tag', exp.risk.toUpperCase());
+        riskTag.style.cssText = `${tagBase};${riskColors[exp.risk] ?? sectorColor}`;
+        tags.append(riskTag);
+      }
+
+      const sectorTag = this.el('span', 'cdp-tag', exp.entry.sector);
+      sectorTag.style.cssText = `${tagBase};${sectorColor}`;
+      tags.append(sectorTag);
+
+      row.append(top, tags);
+
+      if (exp.note) {
+        const note = this.el('div', 'cdp-stock-exposure-note', exp.note);
+        note.style.cssText = 'font-size:11px;color:var(--text-dim,#9ca3af);line-height:1.4';
+        row.append(note);
+      }
+
+      row.addEventListener('click', () => {
+        if (this.isMaximizedState) this.minimize();
+        window.dispatchEvent(new CustomEvent('wm:select-stock', {
+          detail: { ticker: exp.entry.ticker },
+        }));
+      });
+
+      list.append(row);
+    }
+
+    this.stockExposureBody.append(list);
+
+    if (exposures.length > 15) {
+      const more = this.el('div', 'cdp-stock-exposure-more', `+ ${exposures.length - 15} more not shown`);
+      more.style.cssText = 'font-size:11px;color:var(--text-dim,#9ca3af);margin-top:6px';
+      this.stockExposureBody.append(more);
+    }
+  }
+
   public updateMarkets(markets: PredictionMarket[]): void {
     if (!this.marketsBody) return;
     this.marketsBody.replaceChildren();
@@ -2136,6 +2220,11 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     const [infraCard, infraBody] = this.sectionCard(t('countryBrief.infrastructure'));
     const [economicCard, economicBody] = this.sectionCard(t('countryBrief.economicIndicators'));
     const [marketsCard, marketsBody] = this.sectionCard(t('countryBrief.predictionMarkets'));
+    const [stockExposureCard, stockExposureBody] = this.sectionCard(
+      'Stocks With Exposure',
+      'Tracked stocks whose HQ or revenue, supply chain, regulatory, or geopolitical exposure links to this country. Click a row to open it in the Stock Monitor.',
+    );
+    this.stockExposureBody = stockExposureBody;
     const [briefCard, briefBody] = this.sectionCard(t('countryBrief.intelBrief'));
 
     const [factsCard, factsBody] = this.sectionCard(t('countryBrief.countryFacts'));
@@ -2213,7 +2302,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     marketsBody.append(this.makeLoading(t('countryBrief.loadingMarkets')));
     briefBody.append(this.makeLoading(t('countryBrief.generatingBrief')));
 
-    bodyGrid.append(briefCard, factsExpanded, energyCard, maritimeCard, tradeCard, costShockCalcCard, productImportsCard, debtCard, sanctionsCard, comtradeCard, tariffCard, chokepointCard, costShockCard, signalsCard, timelineCard, newsCard, militaryCard, infraCard, economicCard, marketsCard);
+    bodyGrid.append(briefCard, factsExpanded, energyCard, maritimeCard, tradeCard, costShockCalcCard, productImportsCard, debtCard, sanctionsCard, comtradeCard, tariffCard, chokepointCard, costShockCard, signalsCard, timelineCard, newsCard, militaryCard, infraCard, economicCard, marketsCard, stockExposureCard);
     shell.append(header, summaryGrid, bodyGrid);
     this.content.append(shell);
   }

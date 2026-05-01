@@ -378,6 +378,49 @@ export function searchStockCatalog(query: string): StockCatalogEntry[] {
   }).slice(0, 8);
 }
 
+export interface CountryStockExposure {
+  entry: StockCatalogEntry;
+  relationship: 'HQ' | StockRelationshipType;
+  risk: StockRiskLevel | null;
+  note: string | null;
+}
+
+const RISK_RANK: Record<StockRiskLevel, number> = { high: 0, medium: 1, low: 2 };
+
+export function findStocksExposedToCountry(code: string): CountryStockExposure[] {
+  if (!code) return [];
+  const upper = code.toUpperCase();
+  const seen = new Map<string, CountryStockExposure>();
+  for (const entry of STOCK_CATALOG) {
+    const isHq = entry.countryCode.toUpperCase() === upper;
+    let bestRelated: StockExposureCountry | null = null;
+    for (const rel of entry.relatedCountries) {
+      if (rel.code.toUpperCase() !== upper) continue;
+      if (!bestRelated || RISK_RANK[rel.risk] < RISK_RANK[bestRelated.risk]) {
+        bestRelated = rel;
+      }
+    }
+    if (bestRelated) {
+      seen.set(entry.ticker, {
+        entry,
+        relationship: bestRelated.relationship,
+        risk: bestRelated.risk,
+        note: bestRelated.note,
+      });
+    } else if (isHq) {
+      seen.set(entry.ticker, { entry, relationship: 'HQ', risk: null, note: null });
+    }
+  }
+  const list = [...seen.values()];
+  list.sort((a, b) => {
+    const ra = a.risk ? RISK_RANK[a.risk] : 3;
+    const rb = b.risk ? RISK_RANK[b.risk] : 3;
+    if (ra !== rb) return ra - rb;
+    return a.entry.ticker.localeCompare(b.entry.ticker);
+  });
+  return list;
+}
+
 export function getDefaultPortfolioRows(): PortfolioRowInput[] {
   return [
     { ticker: 'AAPL', shares: 18, currency: 'USD', purchasePrice: 184, purchaseDate: '2024-06-12' },
