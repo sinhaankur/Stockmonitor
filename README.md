@@ -35,6 +35,18 @@
 
 ---
 
+## StockMonitor
+
+This fork adds a **stock-focused layer** on top of World Monitor:
+
+- **Geo-Dependency Engine** — maps every stock to its critical-mineral and key-energy inputs, the producer/processor countries that dominate them, and the maritime chokepoints its supply must transit (with a 0–100 dependency score)
+- **Persistent portfolio** — add/edit/remove holdings or upload CSV; shares, cost basis, buy dates, and tunable alert/risk thresholds are saved locally and ride settings export/sync
+- **Stock Global Intelligence** — AI synthesis enriched with the modeled mineral, energy, and chokepoint supply-chain risks
+
+➡️ **Overview page:** [`/Stockmonitor/marketing/`](https://sinhaankur.github.io/Stockmonitor/marketing/) · **Live app:** [sinhaankur.github.io/Stockmonitor](https://sinhaankur.github.io/Stockmonitor/)
+
+---
+
 ## What It Does
 
 - **435+ curated news feeds** across 15 categories, AI-synthesized into briefs
