@@ -11,6 +11,8 @@ export const CLOUD_SYNC_KEYS = [
   'worldmonitor-map-mode',
   'wm-breaking-alerts-v1',
   'wm-market-watchlist-v1',
+  'wm-stock-portfolio-v1',
+  'wm-stock-settings-v1',
   'aviation:watchlist:v1',
   'wm-pinned-webcams',
   'wm-map-provider',

@@ -431,6 +431,123 @@ export function getDefaultPortfolioRows(): PortfolioRowInput[] {
   ];
 }
 
+// --- Persisted portfolio + configurable inputs -----------------------------
+
+export const STOCK_PORTFOLIO_KEY = 'wm-stock-portfolio-v1';
+export const STOCK_SETTINGS_KEY = 'wm-stock-settings-v1';
+export const STOCK_SETTINGS_CHANGE_EVENT = 'wm-stock-settings-changed';
+
+export interface StockMonitorSettings {
+  /** Headlines scoring at or above this impact (0-100) surface as an alert. */
+  alertImpactThreshold: number;
+  /** Position weight (% of tracked value) at or above which concentration is "medium". */
+  concentrationMediumPct: number;
+  /** Position weight (% of tracked value) at or above which concentration is "high". */
+  concentrationHighPct: number;
+  /** Shares assigned to a stock added from search when no position exists yet. */
+  defaultNewShares: number;
+  /** Default reporting currency for portfolio totals. */
+  baseCurrency: string;
+}
+
+export const DEFAULT_STOCK_SETTINGS: StockMonitorSettings = {
+  alertImpactThreshold: 60,
+  concentrationMediumPct: 20,
+  concentrationHighPct: 35,
+  defaultNewShares: 10,
+  baseCurrency: 'USD',
+};
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+export function loadStockSettings(): StockMonitorSettings {
+  try {
+    const raw = localStorage.getItem(STOCK_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<StockMonitorSettings>;
+      const merged = { ...DEFAULT_STOCK_SETTINGS, ...parsed };
+      const high = clampNumber(merged.concentrationHighPct, 1, 100, DEFAULT_STOCK_SETTINGS.concentrationHighPct);
+      const medium = Math.min(high, clampNumber(merged.concentrationMediumPct, 1, 100, DEFAULT_STOCK_SETTINGS.concentrationMediumPct));
+      return {
+        alertImpactThreshold: Math.round(clampNumber(merged.alertImpactThreshold, 0, 100, DEFAULT_STOCK_SETTINGS.alertImpactThreshold)),
+        concentrationMediumPct: medium,
+        concentrationHighPct: high,
+        defaultNewShares: clampNumber(merged.defaultNewShares, 0.0001, 1_000_000, DEFAULT_STOCK_SETTINGS.defaultNewShares),
+        baseCurrency: (typeof merged.baseCurrency === 'string' && merged.baseCurrency.trim())
+          ? merged.baseCurrency.trim().toUpperCase().slice(0, 3)
+          : DEFAULT_STOCK_SETTINGS.baseCurrency,
+      };
+    }
+  } catch {}
+  return { ...DEFAULT_STOCK_SETTINGS };
+}
+
+export function saveStockSettings(settings: StockMonitorSettings): void {
+  try {
+    localStorage.setItem(STOCK_SETTINGS_KEY, JSON.stringify(settings));
+    window.dispatchEvent(new CustomEvent(STOCK_SETTINGS_CHANGE_EVENT, { detail: settings }));
+  } catch {}
+}
+
+export function loadStoredPortfolioRows(): PortfolioRowInput[] | null {
+  try {
+    const raw = localStorage.getItem(STOCK_PORTFOLIO_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const rows: PortfolioRowInput[] = parsed
+      .map((row: unknown): PortfolioRowInput | null => {
+        if (!row || typeof row !== 'object') return null;
+        const record = row as Record<string, unknown>;
+        const ticker = normalizeTicker(String(record.ticker ?? ''));
+        const shares = Number(record.shares);
+        if (!ticker || !Number.isFinite(shares) || shares <= 0) return null;
+        const purchasePriceRaw = Number(record.purchasePrice);
+        const currency = typeof record.currency === 'string' ? record.currency.toUpperCase() : undefined;
+        return {
+          ticker,
+          shares,
+          currency,
+          purchasePrice: Number.isFinite(purchasePriceRaw) && purchasePriceRaw > 0 ? purchasePriceRaw : null,
+          purchaseDate: normalizePurchaseDate(typeof record.purchaseDate === 'string' ? record.purchaseDate : null),
+        };
+      })
+      .filter((row): row is PortfolioRowInput => row !== null);
+    return rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
+}
+
+export function savePortfolioRows(rows: PortfolioRowInput[]): void {
+  try {
+    const serializable = rows
+      .filter((row) => row.ticker && row.shares > 0)
+      .map((row) => ({
+        ticker: row.ticker,
+        shares: row.shares,
+        currency: row.currency ?? null,
+        purchasePrice: row.purchasePrice ?? null,
+        purchaseDate: row.purchaseDate ?? null,
+      }));
+    localStorage.setItem(STOCK_PORTFOLIO_KEY, JSON.stringify(serializable));
+  } catch {}
+}
+
+export function portfolioRowsFromHoldings(holdings: PortfolioHolding[]): PortfolioRowInput[] {
+  return holdings.map((holding) => ({
+    ticker: holding.ticker,
+    shares: holding.shares,
+    currency: holding.quote.currency,
+    purchasePrice: holding.purchasePrice,
+    purchaseDate: holding.purchaseDate,
+  }));
+}
+
 function buildMockQuote(entry: StockCatalogEntry): StockQuoteSnapshot {
   return {
     price: entry.mockPrice,
@@ -487,7 +604,7 @@ export async function buildPortfolioHolding(row: PortfolioRowInput): Promise<Por
     if (allTimeReturnPct === null || holdingDays === null || holdingDays <= 0) return null;
     if (purchasePrice === null || purchasePrice <= 0) return null;
     const costBasis = purchasePrice;
-    return (Math.pow(quote.price / costBasis, 365 / holdingDays) - 1) * 100;
+    return ((quote.price / costBasis) ** (365 / holdingDays) - 1) * 100;
   })();
 
   return {
@@ -649,14 +766,25 @@ function scoreToRisk(score: number): StockRiskLevel {
   return 'low';
 }
 
-export function getHoldingRiskSnapshot(holding: PortfolioHolding, holdings: PortfolioHolding[]): StockRiskSnapshot {
+export function getHoldingRiskSnapshot(
+  holding: PortfolioHolding,
+  holdings: PortfolioHolding[],
+  thresholds: { mediumPct: number; highPct: number } = {
+    mediumPct: DEFAULT_STOCK_SETTINGS.concentrationMediumPct,
+    highPct: DEFAULT_STOCK_SETTINGS.concentrationHighPct,
+  },
+): StockRiskSnapshot {
   const totalValue = holdings.reduce((sum, item) => sum + item.positionValue, 0);
   const positionWeightPct = totalValue > 0 ? (holding.positionValue / totalValue) * 100 : 100;
   const averageCountryRisk = holding.relatedCountries.length > 0
     ? holding.relatedCountries.reduce((sum, country) => sum + riskToScore(country.risk), 0) / holding.relatedCountries.length
     : 1;
   const countryRiskScore = Math.round((averageCountryRisk / 3) * 100);
-  const concentrationRisk: StockRiskLevel = positionWeightPct >= 35 ? 'high' : positionWeightPct >= 20 ? 'medium' : 'low';
+  const concentrationRisk: StockRiskLevel = positionWeightPct >= thresholds.highPct
+    ? 'high'
+    : positionWeightPct >= thresholds.mediumPct
+      ? 'medium'
+      : 'low';
   const overallScore = Math.round((countryRiskScore * 0.65) + (Math.min(positionWeightPct, 100) * 0.35));
   const perCountryPct = holding.relatedCountries.length > 0 ? 100 / holding.relatedCountries.length : 0;
 

@@ -1,18 +1,31 @@
 import { Panel } from './Panel';
 import { escapeHtml } from '@/utils/sanitize';
 import {
+  type StockGeoDependencies,
+  type MineralDependency,
+  type GeoRiskLevel,
+  resolveStockGeoDependencies,
+} from '@/services/stock-geo-dependencies';
+import {
   type StockNewsItem,
   type PortfolioHolding,
   type PortfolioRowInput,
   type StockCatalogEntry,
+  type StockMonitorSettings,
   fetchStockNews,
   getDefaultPortfolioRows,
   getPortfolioGroupBreakdown,
   getHoldingRiskSnapshot,
   getPortfolioSummary,
   loadPortfolio,
+  loadStockSettings,
+  loadStoredPortfolioRows,
   parsePortfolioCsv,
+  portfolioRowsFromHoldings,
+  savePortfolioRows,
+  saveStockSettings,
   searchStockCatalog,
+  STOCK_SETTINGS_CHANGE_EVENT,
 } from '@/services/stock-monitor';
 
 function formatMoney(value: number, currency = 'USD'): string {
@@ -37,6 +50,24 @@ function flagEmoji(code: string): string {
 function toneClass(value: number | null): string {
   if (value === null || Math.abs(value) < 0.1) return 'neutral';
   return value > 0 ? 'positive' : 'negative';
+}
+
+function toneColor(tone: string, neutral = 'var(--text)'): string {
+  if (tone === 'positive') return 'var(--green)';
+  if (tone === 'negative') return 'var(--red)';
+  return neutral;
+}
+
+function riskLevelColor(level: 'low' | 'medium' | 'high'): string {
+  if (level === 'high') return 'var(--red)';
+  if (level === 'medium') return 'var(--warning, #ffcc00)';
+  return '#4da6ff';
+}
+
+function riskBarGradient(level: 'low' | 'medium' | 'high'): string {
+  if (level === 'high') return 'linear-gradient(90deg, rgba(255,82,82,0.95), rgba(255,130,130,0.75))';
+  if (level === 'medium') return 'linear-gradient(90deg, rgba(255,198,92,0.95), rgba(255,223,141,0.75))';
+  return 'linear-gradient(90deg, rgba(77,166,255,0.95), rgba(134,198,255,0.75))';
 }
 
 function formatTimestamp(value: string): string {
@@ -74,6 +105,16 @@ function plainRiskLabel(level: 'low' | 'medium' | 'high'): string {
   return 'Lower risk';
 }
 
+function riskColor(level: GeoRiskLevel): string {
+  if (level === 'high') return 'var(--red)';
+  if (level === 'medium') return 'var(--warning, #ffcc00)';
+  return '#4da6ff';
+}
+
+function intensityDot(level: GeoRiskLevel): string {
+  return `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${riskColor(level)}"></span>`;
+}
+
 export class StockMonitorPanel extends Panel {
   private holdings: PortfolioHolding[] = [];
   private searchQuery = '';
@@ -83,7 +124,10 @@ export class StockMonitorPanel extends Panel {
   private loadingNewsTicker: string | null = null;
   private loadingMessage = 'Loading demo portfolio…';
   private errorMessage: string | null = null;
+  private settings: StockMonitorSettings = loadStockSettings();
+  private settingsOpen = false;
   private collapsedSections: Record<string, boolean> = {
+    geodep: false,
     countries: true,
     concentration: true,
     checklist: true,
@@ -160,6 +204,25 @@ export class StockMonitorPanel extends Panel {
       const saveHoldingBtn = target.closest<HTMLElement>('[data-save-holding]');
       if (saveHoldingBtn) {
         void this.updateSelectedHoldingFromInputs();
+        return;
+      }
+
+      const toggleSettingsBtn = target.closest<HTMLElement>('[data-toggle-settings]');
+      if (toggleSettingsBtn) {
+        this.settingsOpen = !this.settingsOpen;
+        this.render();
+        return;
+      }
+
+      const saveSettingsBtn = target.closest<HTMLElement>('[data-save-settings]');
+      if (saveSettingsBtn) {
+        this.applySettingsFromInputs();
+        return;
+      }
+
+      const removeBtn = target.closest<HTMLElement>('[data-remove-ticker]');
+      if (removeBtn?.dataset.removeTicker) {
+        void this.removeStock(removeBtn.dataset.removeTicker);
       }
     });
 
@@ -171,8 +234,51 @@ export class StockMonitorPanel extends Panel {
     });
 
     window.addEventListener('wm:select-stock', this.handleSelectStockEvent);
+    window.addEventListener(STOCK_SETTINGS_CHANGE_EVENT, this.handleSettingsChangeEvent);
 
-    void this.loadRows(getDefaultPortfolioRows(), 'Loading demo portfolio…');
+    const stored = loadStoredPortfolioRows();
+    if (stored) {
+      void this.loadRows(stored, `Restoring ${stored.length} saved stock${stored.length === 1 ? '' : 's'}…`, { persist: false });
+    } else {
+      void this.loadRows(getDefaultPortfolioRows(), 'Loading demo portfolio…', { persist: false });
+    }
+  }
+
+  private handleSettingsChangeEvent = (event: Event): void => {
+    const detail = (event as CustomEvent<StockMonitorSettings>).detail;
+    if (detail) {
+      this.settings = detail;
+      this.render();
+    }
+  };
+
+  private applySettingsFromInputs(): void {
+    const read = (selector: string): number | null => {
+      const input = this.content.querySelector<HTMLInputElement>(selector);
+      if (!input) return null;
+      const value = Number(input.value);
+      return Number.isFinite(value) ? value : null;
+    };
+
+    const alert = read('[data-setting-alert]');
+    const medium = read('[data-setting-medium]');
+    const high = read('[data-setting-high]');
+    const shares = read('[data-setting-shares]');
+    const currencyInput = this.content.querySelector<HTMLInputElement>('[data-setting-currency]');
+
+    const next: StockMonitorSettings = {
+      alertImpactThreshold: alert === null ? this.settings.alertImpactThreshold : Math.min(100, Math.max(0, Math.round(alert))),
+      concentrationHighPct: high === null ? this.settings.concentrationHighPct : Math.min(100, Math.max(1, high)),
+      concentrationMediumPct: medium === null ? this.settings.concentrationMediumPct : Math.max(1, medium),
+      defaultNewShares: shares === null || shares <= 0 ? this.settings.defaultNewShares : shares,
+      baseCurrency: currencyInput?.value.trim() ? currencyInput.value.trim().toUpperCase().slice(0, 3) : this.settings.baseCurrency,
+    };
+    // Keep medium ≤ high so the bands stay coherent.
+    next.concentrationMediumPct = Math.min(next.concentrationMediumPct, next.concentrationHighPct);
+
+    this.settings = next;
+    saveStockSettings(next);
+    this.render();
   }
 
   private handleSelectStockEvent = (event: Event): void => {
@@ -272,10 +378,26 @@ export class StockMonitorPanel extends Panel {
       purchasePrice: holding.purchasePrice,
       purchaseDate: holding.purchaseDate,
     }));
-    if (!existing.has(ticker)) rows.push({ ticker, shares: 10, purchasePrice: null, purchaseDate: null });
+    if (!existing.has(ticker)) rows.push({ ticker, shares: this.settings.defaultNewShares, purchasePrice: null, purchaseDate: null });
     this.searchQuery = '';
     this.searchResults = searchStockCatalog('');
     await this.loadRows(rows, `Fetching ${ticker}…`);
+  }
+
+  private async removeStock(ticker: string): Promise<void> {
+    const remaining = this.holdings.filter((holding) => holding.ticker !== ticker);
+    if (remaining.length === this.holdings.length) return;
+    if (this.selectedTicker === ticker) {
+      this.selectedTicker = remaining[0]?.ticker ?? null;
+    }
+    if (remaining.length === 0) {
+      this.holdings = [];
+      this.selectedTicker = null;
+      savePortfolioRows([]);
+      this.render();
+      return;
+    }
+    await this.loadRows(portfolioRowsFromHoldings(remaining), `Removing ${ticker}…`);
   }
 
   private async updateSelectedHoldingFromInputs(): Promise<void> {
@@ -329,7 +451,8 @@ export class StockMonitorPanel extends Panel {
     await this.loadRows(rows, `Updating ${selected.ticker}…`);
   }
 
-  private async loadRows(rows: PortfolioRowInput[], initialMessage: string): Promise<void> {
+  private async loadRows(rows: PortfolioRowInput[], initialMessage: string, options: { persist?: boolean } = {}): Promise<void> {
+    const persist = options.persist ?? true;
     this.errorMessage = null;
     this.loadingMessage = initialMessage;
     this.showLoading(this.loadingMessage);
@@ -355,9 +478,41 @@ export class StockMonitorPanel extends Panel {
     this.selectedTicker = this.selectedTicker && this.holdings.some((holding) => holding.ticker === this.selectedTicker)
       ? this.selectedTicker
       : this.holdings[0]?.ticker ?? null;
+    if (persist) this.persistPortfolio();
     this.render();
     this.focusSelectedHolding();
     void this.ensureSelectedNews();
+  }
+
+  private persistPortfolio(): void {
+    savePortfolioRows(portfolioRowsFromHoldings(this.holdings));
+  }
+
+  private renderSettings(): string {
+    const s = this.settings;
+    const field = (label: string, attr: string, value: string | number, opts: { type?: string; min?: string; max?: string; step?: string; placeholder?: string; hint?: string }) => `
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:10px;color:var(--text-dim)">
+        ${escapeHtml(label)}
+        <input ${attr} type="${opts.type ?? 'number'}"${opts.min ? ` min="${opts.min}"` : ''}${opts.max ? ` max="${opts.max}"` : ''}${opts.step ? ` step="${opts.step}"` : ''} value="${escapeHtml(String(value))}"${opts.placeholder ? ` placeholder="${escapeHtml(opts.placeholder)}"` : ''} style="padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.03);color:var(--text);font-size:11px" />
+        ${opts.hint ? `<span style="font-size:9px;color:var(--text-dim)">${escapeHtml(opts.hint)}</span>` : ''}
+      </label>`;
+
+    return `
+      <div style="padding:12px;border-radius:12px;background:rgba(13,17,23,0.55);border:1px solid rgba(77,166,255,0.25)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+          <div style="font-size:11px;font-weight:700;color:var(--text)">Stock Monitor settings</div>
+          <button type="button" data-save-settings style="padding:6px 12px;border-radius:8px;border:1px solid rgba(77,166,255,0.35);background:rgba(77,166,255,0.12);color:#7bb7ff;font-size:10px;cursor:pointer">Save settings</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+          ${field('Alert impact threshold (0–100)', 'data-setting-alert', s.alertImpactThreshold, { min: '0', max: '100', step: '1', hint: 'Headlines at or above this score raise an alert.' })}
+          ${field('Default shares for new stocks', 'data-setting-shares', s.defaultNewShares, { min: '0.0001', step: '0.0001', hint: 'Used when you add a stock from search.' })}
+          ${field('Concentration: medium at %', 'data-setting-medium', s.concentrationMediumPct, { min: '1', max: '100', step: '0.5', hint: 'Position weight that flags medium concentration.' })}
+          ${field('Concentration: high at %', 'data-setting-high', s.concentrationHighPct, { min: '1', max: '100', step: '0.5', hint: 'Position weight that flags high concentration.' })}
+          ${field('Base currency', 'data-setting-currency', s.baseCurrency, { type: 'text', placeholder: 'USD', hint: '3-letter code for portfolio totals.' })}
+        </div>
+        <div style="margin-top:8px;font-size:9px;color:var(--text-dim)">Settings, holdings, shares, and purchase data are saved on this device and included in Settings export/sync.</div>
+      </div>
+    `;
   }
 
   private renderSearchResults(): string {
@@ -404,47 +559,39 @@ export class StockMonitorPanel extends Panel {
           const priceTone = toneClass(holding.quote.changePercent);
           const returnTone = toneClass(holding.allTimeReturnPct);
           return `
-            <button type="button" data-select-ticker="${escapeHtml(holding.ticker)}" style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;border:1px solid ${selected ? 'rgba(77,166,255,0.7)' : 'rgba(255,255,255,0.08)'};background:${selected ? 'rgba(77,166,255,0.12)' : 'rgba(255,255,255,0.03)'};color:inherit;text-align:left;cursor:pointer">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-                <div>
-                  <div style="font-size:12px;font-weight:700;color:var(--text)">${escapeHtml(holding.ticker)} · ${escapeHtml(holding.companyName)}</div>
-                  <div style="font-size:10px;color:var(--text-dim)">${flagEmoji(holding.countryCode)} ${escapeHtml(holding.hqCountry)} · ${escapeHtml(holding.sector)}</div>
+            <div style="position:relative">
+              <button type="button" data-select-ticker="${escapeHtml(holding.ticker)}" style="display:flex;flex-direction:column;gap:6px;width:100%;padding:10px 12px;border-radius:12px;border:1px solid ${selected ? 'rgba(77,166,255,0.7)' : 'rgba(255,255,255,0.08)'};background:${selected ? 'rgba(77,166,255,0.12)' : 'rgba(255,255,255,0.03)'};color:inherit;text-align:left;cursor:pointer">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                  <div>
+                    <div style="font-size:12px;font-weight:700;color:var(--text)">${escapeHtml(holding.ticker)} · ${escapeHtml(holding.companyName)}</div>
+                    <div style="font-size:10px;color:var(--text-dim)">${flagEmoji(holding.countryCode)} ${escapeHtml(holding.hqCountry)} · ${escapeHtml(holding.sector)}</div>
+                  </div>
+                  <div style="text-align:right;padding-right:18px">
+                    <div style="font-size:12px;font-weight:700;color:var(--text)">${formatMoney(holding.quote.price, holding.quote.currency)}</div>
+                    <div style="font-size:10px;color:${priceTone === 'positive' ? 'var(--green)' : priceTone === 'negative' ? 'var(--red)' : 'var(--warning, #ffcc00)'}">${formatPct(holding.quote.changePercent)}</div>
+                  </div>
                 </div>
-                <div style="text-align:right">
-                  <div style="font-size:12px;font-weight:700;color:var(--text)">${formatMoney(holding.quote.price, holding.quote.currency)}</div>
-                  <div style="font-size:10px;color:${priceTone === 'positive' ? 'var(--green)' : priceTone === 'negative' ? 'var(--red)' : 'var(--warning, #ffcc00)'}">${formatPct(holding.quote.changePercent)}</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px;color:var(--text-dim)">
+                  <span>${holding.shares} shares · ${formatMoney(holding.positionValue, holding.quote.currency)}</span>
+                  <span style="color:${returnTone === 'positive' ? 'var(--green)' : returnTone === 'negative' ? 'var(--red)' : 'var(--text-dim)'}">${formatPct(holding.allTimeReturnPct)}</span>
                 </div>
-              </div>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px;color:var(--text-dim)">
-                <span>${holding.shares} shares · ${formatMoney(holding.positionValue, holding.quote.currency)}</span>
-                <span style="color:${returnTone === 'positive' ? 'var(--green)' : returnTone === 'negative' ? 'var(--red)' : 'var(--text-dim)'}">${formatPct(holding.allTimeReturnPct)}</span>
-              </div>
-            </button>
+              </button>
+              <button type="button" data-remove-ticker="${escapeHtml(holding.ticker)}" title="Remove ${escapeHtml(holding.ticker)}" aria-label="Remove ${escapeHtml(holding.ticker)}" style="position:absolute;top:8px;right:8px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.25);color:var(--text-dim);font-size:11px;line-height:1;cursor:pointer">×</button>
+            </div>
           `;
         }).join('')}
       </div>
     `;
   }
 
-  private renderDetail(): string {
-    const selected = this.holdings.find((holding) => holding.ticker === this.selectedTicker) ?? this.holdings[0] ?? null;
-    if (!selected) {
-      return '<div style="font-size:12px;color:var(--text-dim)">Select a stock to view its profile.</div>';
-    }
-
-    const summary = getPortfolioSummary(this.holdings);
-    const risk = getHoldingRiskSnapshot(selected, this.holdings);
-    const news = this.newsByTicker.get(selected.ticker) ?? [];
-    const topImpactNews = [...news].sort((a, b) => b.impactScore - a.impactScore)[0] ?? null;
-    const quoteTone = toneClass(selected.quote.changePercent);
-    const returnTone = toneClass(selected.allTimeReturnPct);
-    const annualizedTone = toneClass(selected.annualizedReturnPct);
-    const topCountry = summary.topCountries[0] ?? null;
-    const isCountriesCollapsed = this.collapsedSections.countries;
-    const isConcentrationCollapsed = this.collapsedSections.concentration;
-    const isChecklistCollapsed = this.collapsedSections.checklist;
-    const isNewsCollapsed = this.collapsedSections.news;
-    const quickTake = [
+  private buildQuickTake(
+    selected: PortfolioHolding,
+    risk: ReturnType<typeof getHoldingRiskSnapshot>,
+    geo: StockGeoDependencies,
+    topCountry: { name: string; value: number } | null,
+    topImpactNews: StockNewsItem | null,
+  ): string[] {
+    return [
       `${plainTrendLabel(selected.quote.changePercent)} (${formatPct(selected.quote.changePercent)}).`,
       selected.allTimeReturnPct === null
         ? 'Add purchase price to see return from your entry.'
@@ -456,16 +603,123 @@ export class StockMonitorPanel extends Panel {
       topCountry
         ? `Top country exposure: ${escapeHtml(topCountry.name)} (${formatMoney(topCountry.value, selected.quote.currency)}).`
         : 'Country exposure not available yet.',
+      geo.headline
+        ? `Geo-wiring: ${escapeHtml(geo.headline)} Dependency ${geo.geoDependencyScore}/100 (${plainRiskLabel(geo.geoDependencyLevel)}).`
+        : 'No critical mineral or energy dependency detected.',
       topImpactNews
         ? `Most impactful event: ${escapeHtml(topImpactNews.title)} (impact ${topImpactNews.impactScore}/100).`
         : 'No major headline impact detected yet.',
     ];
+  }
+
+  private renderMineralDependency(dep: MineralDependency): string {
+    const countryChip = (c: { country: string; code: string; sharePct: number }) => `
+      <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);font-size:9px;color:var(--text)">
+        ${flagEmoji(c.code)} ${escapeHtml(c.country)} ${Math.round(c.sharePct)}%
+      </span>`;
+    const producers = dep.topProducers.slice(0, 3).map(countryChip).join('');
+    const processors = dep.topProcessors.slice(0, 3).map(countryChip).join('');
+
+    return `
+      <div style="padding:8px 10px;border-radius:10px;background:rgba(13,17,23,0.55);border:1px solid rgba(255,255,255,0.06)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--text)">${intensityDot(dep.intensity)} ${escapeHtml(dep.mineral)}</span>
+          <span style="font-size:9px;color:${riskColor(dep.concentrationRisk)}">${dep.concentrationRisk.toUpperCase()} concentration · ${dep.concentrationScore}/100</span>
+        </div>
+        <div style="font-size:9px;color:var(--text-dim);line-height:1.45;margin-bottom:6px">${escapeHtml(dep.reason)}</div>
+        ${producers ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px"><span style="font-size:9px;color:var(--text-dim);margin-right:2px">Mined:</span>${producers}</div>` : ''}
+        ${processors ? `<div style="display:flex;flex-wrap:wrap;gap:4px"><span style="font-size:9px;color:var(--text-dim);margin-right:2px">Processed:</span>${processors}</div>` : ''}
+      </div>`;
+  }
+
+  private renderGeoDependency(geo: StockGeoDependencies, collapsed: boolean): string {
+    const hasContent = geo.minerals.length > 0 || geo.energy.length > 0 || geo.chokepoints.length > 0;
+    const summaryLine = `${geo.minerals.length} mineral${geo.minerals.length === 1 ? '' : 's'} · ${geo.energy.length} energy · ${geo.chokepoints.length} chokepoint${geo.chokepoints.length === 1 ? '' : 's'}`;
+
+    return `
+      <div data-detail-section="geodep" style="padding:10px;border-radius:10px;background:rgba(13,17,23,0.6);border:1px solid ${geo.geoDependencyLevel === 'high' ? 'rgba(255,82,82,0.3)' : geo.geoDependencyLevel === 'medium' ? 'rgba(255,198,92,0.3)' : 'rgba(77,166,255,0.25)'}">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="font-size:11px;font-weight:700;color:var(--text)">Geo-dependency & critical inputs</div>
+            <div style="font-size:9px;color:var(--text-dim)">${summaryLine}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;font-weight:700;color:${riskColor(geo.geoDependencyLevel)}">${geo.geoDependencyScore}/100</span>
+            <button type="button" data-toggle-section="geodep" style="padding:4px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">${collapsed ? 'Expand' : 'Collapse'}</button>
+          </div>
+        </div>
+        ${collapsed ? `<div style="font-size:10px;color:var(--text-dim)">${geo.headline ? escapeHtml(geo.headline) : 'Expand to see mineral, energy, and chokepoint wiring.'}</div>` : (!hasContent ? `<div style="font-size:10px;color:var(--text-dim)">No material critical-input dependency modeled for this stock.</div>` : `
+          ${geo.minerals.length > 0 ? `
+            <div style="font-size:9px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px">Critical minerals</div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+              ${geo.minerals.map((dep) => this.renderMineralDependency(dep)).join('')}
+            </div>
+          ` : ''}
+          ${geo.energy.length > 0 ? `
+            <div style="font-size:9px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px">Key energy inputs</div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px">
+              ${geo.energy.map((dep) => `
+                <div style="padding:8px 10px;border-radius:10px;background:rgba(13,17,23,0.55);border:1px solid rgba(255,255,255,0.06)">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
+                    <span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--text)">${intensityDot(dep.intensity)} ${escapeHtml(dep.input)}</span>
+                    <span style="font-size:9px;color:var(--text-dim)">${dep.sourceRegions.map((r) => escapeHtml(r)).join(' · ')}</span>
+                  </div>
+                  <div style="font-size:9px;color:var(--text-dim);line-height:1.45">${escapeHtml(dep.reason)}</div>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${geo.chokepoints.length > 0 ? `
+            <div style="font-size:9px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px">Maritime chokepoints at risk</div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${geo.chokepoints.map((cp) => `
+                <span title="${escapeHtml(cp.drivers.join(', '))}" style="display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:rgba(255,255,255,0.04);border:1px solid ${riskColor(cp.risk)}33;font-size:10px;color:var(--text)">
+                  ${intensityDot(cp.risk)} ${escapeHtml(cp.name)}
+                </span>
+              `).join('')}
+            </div>
+            <div style="margin-top:6px;font-size:9px;color:var(--text-dim)">Chokepoint risk reflects where this stock's mineral and energy supply must transit — disruptions ripple into cost and availability.</div>
+          ` : ''}
+        `)}
+      </div>`;
+  }
+
+  private renderDetail(): string {
+    const selected = this.holdings.find((holding) => holding.ticker === this.selectedTicker) ?? this.holdings[0] ?? null;
+    if (!selected) {
+      return '<div style="font-size:12px;color:var(--text-dim)">Select a stock to view its profile.</div>';
+    }
+
+    const summary = getPortfolioSummary(this.holdings);
+    const risk = getHoldingRiskSnapshot(selected, this.holdings, {
+      mediumPct: this.settings.concentrationMediumPct,
+      highPct: this.settings.concentrationHighPct,
+    });
+    const geo = resolveStockGeoDependencies(selected);
+    const news = this.newsByTicker.get(selected.ticker) ?? [];
+    const rankedNews = [...news].sort((a, b) => b.impactScore - a.impactScore);
+    const topRankedNews = rankedNews[0] ?? null;
+    // Only treat the top headline as an alert if it clears the configured impact threshold.
+    const topImpactNews = topRankedNews && topRankedNews.impactScore >= this.settings.alertImpactThreshold
+      ? topRankedNews
+      : null;
+    const quoteTone = toneClass(selected.quote.changePercent);
+    const returnTone = toneClass(selected.allTimeReturnPct);
+    const annualizedTone = toneClass(selected.annualizedReturnPct);
+    const topCountry = summary.topCountries[0] ?? null;
+    const isGeodepCollapsed = this.collapsedSections.geodep ?? false;
+    const isCountriesCollapsed = this.collapsedSections.countries;
+    const isConcentrationCollapsed = this.collapsedSections.concentration;
+    const isChecklistCollapsed = this.collapsedSections.checklist;
+    const isNewsCollapsed = this.collapsedSections.news;
+    const quickTake = this.buildQuickTake(selected, risk, geo, topCountry, topImpactNews);
 
     return `
       <div style="display:flex;flex-direction:column;gap:12px;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.03);max-height:min(78vh,980px);overflow:auto;scroll-behavior:smooth">
         <div style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;border-radius:10px;background:rgba(13,17,23,0.5);border:1px solid rgba(255,255,255,0.08);position:sticky;top:0;z-index:1;backdrop-filter:blur(4px)">
           <button type="button" data-jump-section="summary" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">Summary</button>
           <button type="button" data-jump-section="holding" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">Holding</button>
+          <button type="button" data-jump-section="geodep" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">Geo-wiring</button>
           <button type="button" data-jump-section="risk" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">Risk</button>
           <button type="button" data-jump-section="alerts" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">Alerts</button>
           <button type="button" data-jump-section="news" style="padding:5px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);color:var(--text);font-size:10px;cursor:pointer">News</button>
@@ -478,11 +732,11 @@ export class StockMonitorPanel extends Panel {
           </div>
           <div style="padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.03)">
             <div style="font-size:9px;color:var(--text-dim)">Return</div>
-            <div style="font-size:11px;font-weight:700;color:${returnTone === 'positive' ? 'var(--green)' : returnTone === 'negative' ? 'var(--red)' : 'var(--text)'}">${formatPct(selected.allTimeReturnPct)}</div>
+            <div style="font-size:11px;font-weight:700;color:${toneColor(returnTone)}">${formatPct(selected.allTimeReturnPct)}</div>
           </div>
           <div style="padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.03)">
             <div style="font-size:9px;color:var(--text-dim)">Risk</div>
-            <div style="font-size:11px;font-weight:700;color:${risk.overallLevel === 'high' ? 'var(--red)' : risk.overallLevel === 'medium' ? 'var(--warning, #ffcc00)' : '#4da6ff'}">${escapeHtml(risk.overallLevel.toUpperCase())}</div>
+            <div style="font-size:11px;font-weight:700;color:${riskLevelColor(risk.overallLevel)}">${escapeHtml(risk.overallLevel.toUpperCase())}</div>
           </div>
           <div style="padding:6px 8px;border-radius:8px;background:rgba(255,255,255,0.03)">
             <div style="font-size:9px;color:var(--text-dim)">Top alert</div>
@@ -513,13 +767,13 @@ export class StockMonitorPanel extends Panel {
           <div style="padding:10px;border-radius:10px;background:rgba(13,17,23,0.55)">
             <div style="font-size:10px;color:var(--text-dim)">Live price</div>
             <div style="font-size:16px;font-weight:700;color:var(--text)">${formatMoney(selected.quote.price, selected.quote.currency)}</div>
-            <div style="font-size:11px;color:${quoteTone === 'positive' ? 'var(--green)' : quoteTone === 'negative' ? 'var(--red)' : 'var(--warning, #ffcc00)'}">${formatPct(selected.quote.changePercent)} · ${selected.quote.source === 'google' ? 'Google Finance' : 'Fallback quote'}</div>
+            <div style="font-size:11px;color:${toneColor(quoteTone, 'var(--warning, #ffcc00)')}">${formatPct(selected.quote.changePercent)} · ${selected.quote.source === 'google' ? 'Google Finance' : 'Fallback quote'}</div>
           </div>
           <div style="padding:10px;border-radius:10px;background:rgba(13,17,23,0.55)">
             <div style="font-size:10px;color:var(--text-dim)">All-time return</div>
-            <div style="font-size:16px;font-weight:700;color:${returnTone === 'positive' ? 'var(--green)' : returnTone === 'negative' ? 'var(--red)' : 'var(--text)'}">${formatPct(selected.allTimeReturnPct)}</div>
+            <div style="font-size:16px;font-weight:700;color:${toneColor(returnTone)}">${formatPct(selected.allTimeReturnPct)}</div>
             <div style="font-size:11px;color:var(--text-dim)">${selected.purchasePrice ? `Cost basis ${formatMoney(selected.purchasePrice, selected.quote.currency)}` : 'No purchase price provided'}</div>
-            <div style="font-size:10px;color:${annualizedTone === 'positive' ? 'var(--green)' : annualizedTone === 'negative' ? 'var(--red)' : 'var(--text-dim)'};margin-top:3px">Annualized: ${formatPct(selected.annualizedReturnPct)} · Held ${formatHoldingDays(selected.holdingDays)}</div>
+            <div style="font-size:10px;color:${toneColor(annualizedTone, 'var(--text-dim)')};margin-top:3px">Annualized: ${formatPct(selected.annualizedReturnPct)} · Held ${formatHoldingDays(selected.holdingDays)}</div>
           </div>
         </div>
 
@@ -573,6 +827,8 @@ export class StockMonitorPanel extends Panel {
           </div>
         </div>
 
+        ${this.renderGeoDependency(geo, isGeodepCollapsed)}
+
         <div>
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
             <div style="font-size:11px;font-weight:700;color:var(--text)">Related countries and industry exposure</div>
@@ -584,7 +840,7 @@ export class StockMonitorPanel extends Panel {
                 <div style="padding:8px 10px;border-radius:10px;background:rgba(13,17,23,0.55);border:1px solid rgba(255,255,255,0.06)">
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
                     <span style="font-size:11px;font-weight:700;color:var(--text)">${escapeHtml(country.name)}</span>
-                    <span style="font-size:10px;color:${country.risk === 'high' ? 'var(--red)' : country.risk === 'medium' ? 'var(--warning, #ffcc00)' : '#4da6ff'}">${escapeHtml(country.relationship)} · ${escapeHtml(country.risk)}</span>
+                    <span style="font-size:10px;color:${riskLevelColor(country.risk)}">${escapeHtml(country.relationship)} · ${escapeHtml(country.risk)}</span>
                   </div>
                   <div style="font-size:10px;color:var(--text-dim);line-height:1.45">${escapeHtml(country.note)}</div>
                 </div>
@@ -609,7 +865,7 @@ export class StockMonitorPanel extends Panel {
         <div data-detail-section="risk" style="padding:10px;border-radius:10px;background:rgba(13,17,23,0.55)">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
             <div style="font-size:11px;font-weight:700;color:var(--text)">Exposure and risk</div>
-            <div style="font-size:10px;color:${risk.overallLevel === 'high' ? 'var(--red)' : risk.overallLevel === 'medium' ? 'var(--warning, #ffcc00)' : '#4da6ff'}">${escapeHtml(risk.overallLevel.toUpperCase())} · ${risk.overallScore}/100</div>
+            <div style="font-size:10px;color:${riskLevelColor(risk.overallLevel)}">${escapeHtml(risk.overallLevel.toUpperCase())} · ${risk.overallScore}/100</div>
           </div>
           <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:10px;font-size:10px;color:var(--text-dim)">
             <div>Position weight: ${risk.positionWeightPct.toFixed(1)}%</div>
@@ -620,10 +876,10 @@ export class StockMonitorPanel extends Panel {
               <div>
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;margin-bottom:4px">
                   <span style="color:var(--text)">${escapeHtml(item.name)}</span>
-                  <span style="color:${item.risk === 'high' ? 'var(--red)' : item.risk === 'medium' ? 'var(--warning, #ffcc00)' : '#4da6ff'}">${item.valuePct.toFixed(0)}% · ${escapeHtml(item.risk)}</span>
+                  <span style="color:${riskLevelColor(item.risk)}">${item.valuePct.toFixed(0)}% · ${escapeHtml(item.risk)}</span>
                 </div>
                 <div style="height:7px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden">
-                  <div style="width:${item.valuePct}%;height:100%;background:${item.risk === 'high' ? 'linear-gradient(90deg, rgba(255,82,82,0.95), rgba(255,130,130,0.75))' : item.risk === 'medium' ? 'linear-gradient(90deg, rgba(255,198,92,0.95), rgba(255,223,141,0.75))' : 'linear-gradient(90deg, rgba(77,166,255,0.95), rgba(134,198,255,0.75))'}"></div>
+                  <div style="width:${item.valuePct}%;height:100%;background:${riskBarGradient(item.risk)}"></div>
                 </div>
               </div>
             `).join('')}
@@ -657,7 +913,7 @@ export class StockMonitorPanel extends Panel {
               <div style="margin-top:6px;font-size:10px;color:var(--text-dim)">${escapeHtml(topImpactNews.source)}${formatPublishedDate(topImpactNews.publishedAt) ? ` · ${escapeHtml(formatPublishedDate(topImpactNews.publishedAt))}` : ''} · ${escapeHtml(topImpactNews.impactReason)}</div>
             </a>
           ` : `
-            <div style="font-size:10px;color:var(--text-dim)">No high-impact event detected yet for this stock. Alerts will highlight the strongest headline when available.</div>
+            <div style="font-size:10px;color:var(--text-dim)">No headline at or above your ${this.settings.alertImpactThreshold}/100 alert threshold${topRankedNews ? ` (strongest so far: ${topRankedNews.impactScore}/100)` : ''}. Lower the threshold in panel settings to surface more alerts.</div>
           `}
         </div>
 
@@ -687,7 +943,7 @@ export class StockMonitorPanel extends Panel {
 
   private render(): void {
     const groups = getPortfolioGroupBreakdown(this.holdings);
-    const selectedCurrency = this.holdings[0]?.quote.currency ?? 'USD';
+    const selectedCurrency = this.holdings[0]?.quote.currency ?? this.settings.baseCurrency;
     const html = `
       <div style="display:flex;flex-direction:column;gap:12px">
         <div style="padding:12px;border-radius:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08)">
@@ -697,10 +953,13 @@ export class StockMonitorPanel extends Panel {
               <span>Upload CSV</span>
               <input data-stock-csv type="file" accept=".csv,text/csv" style="display:none" />
             </label>
+            <button type="button" data-toggle-settings style="display:inline-flex;align-items:center;gap:6px;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(13,17,23,0.72);font-size:11px;cursor:pointer;color:var(--text)">⚙ Settings</button>
           </div>
           <div style="margin-top:8px;font-size:10px;color:var(--text-dim)">CSV columns: Ticker, Shares, Currency, Purchase Price, Purchase Date</div>
           ${this.renderSearchResults()}
         </div>
+
+        ${this.settingsOpen ? this.renderSettings() : ''}
 
         <div style="padding:10px;border-radius:12px;background:rgba(13,17,23,0.55);border:1px solid rgba(255,255,255,0.08)">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">

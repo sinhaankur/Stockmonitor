@@ -65,6 +65,8 @@ import { t } from '@/services/i18n';
 import { TvModeController } from '@/services/tv-mode';
 import { getRuntimeConfigSnapshot, setFeatureToggle, setSecretValue } from '@/services/runtime-config';
 import { getCountryCentroid } from '@/services/country-geometry';
+import { findStockCatalogEntry } from '@/services/stock-monitor';
+import { resolveStockGeoDependencies } from '@/services/stock-geo-dependencies';
 
 export interface EventHandlerCallbacks {
   updateSearchIndex: () => void;
@@ -1645,6 +1647,26 @@ export class EventHandlerManager implements AppModule {
       .filter((c: { relationship: string }) => c.relationship === 'Supply Chain')
       .map((c: { name: string; risk: string; relationship: string }) => `${c.name}: ${c.risk} risk`);
 
+    // Enrich with the modeled critical-mineral / energy / chokepoint geo-wiring.
+    const geoEntry = findStockCatalogEntry(detail.ticker);
+    const geoDeps = geoEntry ? resolveStockGeoDependencies(geoEntry) : null;
+    if (geoDeps) {
+      for (const mineral of geoDeps.minerals) {
+        if (mineral.intensity === 'low') continue;
+        const topSource = mineral.topProcessors[0] ?? mineral.topProducers[0];
+        const where = topSource ? ` (concentrated: ${topSource.country} ${Math.round(topSource.sharePct)}%)` : '';
+        supplyChainRisks.push(`${mineral.mineral}: ${mineral.concentrationRisk} concentration${where}`);
+      }
+      for (const energy of geoDeps.energy) {
+        if (energy.intensity === 'low') continue;
+        supplyChainRisks.push(`Energy · ${energy.input}: ${energy.sourceRegions[0] ?? 'global'} dependency`);
+      }
+      for (const cp of geoDeps.chokepoints) {
+        if (cp.risk === 'low') continue;
+        supplyChainRisks.push(`Chokepoint · ${cp.name}: ${cp.risk} transit risk`);
+      }
+    }
+
     // Geopolitical risks from latest intel
     const geopoliticalRisks = relevantIntel
       .slice(0, 5)
@@ -1712,7 +1734,16 @@ export class EventHandlerManager implements AppModule {
       })
       .filter((item): item is { lat: number; lon: number; title: string; threatLevel: string; timestamp: Date } => item !== null);
 
-    this.ctx.map?.setStockExposureLocations(exposureLocations);
+    // Add maritime chokepoints the supply chain transits as risk-coded markers.
+    const chokepointLocations = (geoDeps?.chokepoints ?? []).map((cp) => ({
+      lat: cp.lat,
+      lon: cp.lon,
+      title: `Chokepoint · ${detail.ticker} · ${cp.name} (${cp.drivers.join(', ')})`,
+      threatLevel: cp.risk === 'high' ? 'critical' : cp.risk === 'medium' ? 'high' : 'elevated',
+      timestamp: new Date(),
+    }));
+
+    this.ctx.map?.setStockExposureLocations([...exposureLocations, ...chokepointLocations]);
   }
 
   private normalizeLocalAiUrl(raw: string): string | null {
